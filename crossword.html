@@ -1,0 +1,629 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>주제기반 실시간 크로스워드 15x15 (힌트·필터·타이머·랭킹)</title>
+<style>
+  :root{ --size:40px; --gap:2px; --accent:#2563eb; --ink:#0f172a; --muted:#64748b; --bad:#ef4444; --ok:#10b981; }
+  body{font-family:system-ui,Segoe UI,Roboto,"Noto Sans KR",sans-serif; margin:0; background:#f8fafc; color:var(--ink)}
+  header{padding:14px 16px; display:flex; flex-wrap:wrap; gap:10px; align-items:center; border-bottom:1px solid #e5e7eb}
+  h1{font-size:18px; margin:0}
+  .row{display:flex; gap:8px; flex-wrap:wrap; align-items:center}
+  input,button{font-size:14px}
+  input[type=text]{padding:8px 10px; border:1px solid #cbd5e1; border-radius:10px; min-width:200px}
+  button{padding:8px 12px; border:1px solid #cbd5e1; border-radius:10px; background:#fff; cursor:pointer}
+  button.primary{border-color:var(--accent); background:var(--accent); color:#fff}
+  .pill{border:1px solid #e2e8f0; border-radius:999px; padding:4px 8px; font-size:12px; color:#334155}
+  .wrap{display:grid; grid-template-columns: 1fr 340px; gap:16px; padding:16px}
+  @media(max-width:980px){ .wrap{grid-template-columns:1fr} }
+  .board-wrap,.side{background:#fff; border:1px solid #e5e7eb; border-radius:12px; padding:12px}
+  .board{display:grid; gap:var(--gap); justify-content:start}
+  .cell{width:var(--size); height:var(--size); border:1px solid #e5e7eb; border-radius:6px; position:relative; display:flex; align-items:center; justify-content:center; background:#fff}
+  .cell.block{background:#0f172a; border-color:#0f172a}
+  .num{position:absolute; top:3px; left:5px; font-size:10px; color:#475569}
+  .cell input{width:100%; height:100%; border:0; outline:0; background:transparent; text-align:center; font-size:20px; text-transform:uppercase; color:#0f172a}
+  .cell.active{outline:2px solid var(--accent)}
+  .cell.word{box-shadow: inset 0 0 0 2px rgba(37,99,235,.25)}
+  small{color:var(--muted)}
+  .side h3{margin:6px 0 4px; font-size:14px}
+  .hintlist{font-size:13px; line-height:1.45; max-height:260px; overflow:auto; border:1px dashed #e5e7eb; border-radius:10px; padding:8px}
+  .hintlist li{margin:2px 0}
+  .meters{display:flex; gap:8px; flex-wrap:wrap; margin:8px 0}
+  progress{width:160px; height:14px}
+  table{width:100%; border-collapse:collapse; font-size:13px}
+  th,td{border-bottom:1px solid #e5e7eb; padding:6px 4px; text-align:left}
+  .ok{color:var(--ok)}
+  .bad{background:#fee2e2}
+</style>
+</head>
+<body>
+<header>
+  <h1>주제기반 실시간 크로스워드 15×15</h1>
+  <div class="row">
+    <input id="nick" type="text" placeholder="닉네임" style="min-width:120px"/>
+    <input id="room" type="text" placeholder="방코드(예: 6-2-금요일)" />
+    <button id="createRoom">방 생성</button>
+    <button id="joinRoom" class="primary">방 접속</button>
+    <span class="pill" id="roomInfo">방 미연결</span>
+    <span class="pill" id="peers">참여자: 0</span>
+  </div>
+</header>
+
+<div class="wrap">
+  <section class="board-wrap">
+    <div class="row" style="margin-bottom:8px">
+      <input id="topic" type="text" placeholder="주제 입력 (예: 바다, 우주, 통영, 한국사)"/>
+      <button id="fetchWords">단어 가져오기</button>
+      <button id="build" class="primary">퍼즐 생성</button>
+      <button id="check">오답 표시</button>
+      <button id="reveal">현재 단어 공개</button>
+      <span class="pill" id="dirPill">방향: 가로</span>
+    </div>
+    <div class="meters">
+      <span class="pill" id="status">준비 완료</span>
+      <span class="pill" id="timer">00:00</span>
+      <progress id="prog" max="100" value="0"></progress>
+      <span id="progTxt" class="pill">진행 0%</span>
+    </div>
+    <div id="board" class="board" role="grid" aria-label="crossword board"></div>
+    <small>조작: 방향키 이동 / Space·Tab 가로↔세로 / Enter 다음 단어</small>
+  </section>
+
+  <aside class="side">
+    <h3>힌트(자동 고도화)</h3>
+    <ol id="hints" class="hintlist"></ol>
+
+    <h3>랭킹(완료 시간)</h3>
+    <table>
+      <thead><tr><th>순위</th><th>닉네임</th><th>시간</th><th>진행</th></tr></thead>
+      <tbody id="rank"></tbody>
+    </table>
+  </aside>
+</div>
+
+<!-- Firebase -->
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+
+<script>
+/* =========== Firebase 설정 (교체하세요) =========== */
+const firebaseConfig = {
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR-PROJECT.firebaseapp.com",
+  databaseURL: "https://YOUR-PROJECT-default-rtdb.firebaseio.com",
+  projectId: "YOUR-PROJECT",
+  storageBucket: "YOUR-PROJECT.appspot.com",
+  messagingSenderId: "1234567890",
+  appId: "YOUR_APP_ID"
+};
+/* ================================================= */
+
+/* ===== 기본 상수/상태 ===== */
+const SIZE = 15;
+const MAX_WORDS = 20; // 가로+세로 합산 목표
+const BADWORDS = [
+  // 매우 보수적으로: 과격/외설/비하/정치적 민감어 등 수업용 금칙어
+  "시발","씨발","병신","병맛","개새","좆","sex","porn","fuck","shit","bitch","nazi",
+  "죽여","자살","폭탄","테러","마약","음란","혐오"
+];
+let GRID = Array.from({length:SIZE},()=>Array(SIZE).fill('#'));
+let numbers = Array.from({length:SIZE},()=>Array(SIZE).fill(null));
+let direction = 'across';
+let current = {r:0,c:0};
+let WORDS = []; // {word, clue, _placed:{row,col,dir,clue,word}}
+let ROOM = null, NICK = null;
+let db=null, presenceRef=null;
+let startAt=null, timerId=null;
+
+/* ===== 유틸 ===== */
+const setStatus = t => document.getElementById('status').textContent=t;
+const inBounds = (r,c)=> r>=0 && c>=0 && r<SIZE && c<SIZE;
+const id = (r,c)=> `r${r}c${c}`;
+const now = ()=> Date.now();
+const secToMMSS = s => {
+  const m = Math.floor(s/60).toString().padStart(2,'0');
+  const ss = Math.floor(s%60).toString().padStart(2,'0');
+  return `${m}:${ss}`;
+};
+function containsBadWord(s){
+  const lower = s.toLowerCase();
+  return BADWORDS.some(b => lower.includes(b));
+}
+function normalizeWord(w){
+  return /[ㄱ-ㅎㅏ-ㅣ가-힣]/.test(w) ? w.replace(/\s|-/g,'') : w.replace(/\s|-/g,'').toUpperCase();
+}
+
+/* ===== 연관어 수집 + 금칙어 필터 + 힌트 고도화 ===== */
+async function fetchRelatedWords(topic, max=60){
+  const isKo = /[가-힣]/.test(topic);
+  const lang = isKo ? 'ko' : 'en';
+  const enc = encodeURIComponent;
+  const url = `https://api.conceptnet.io/related/c/${lang}/${enc(topic)}?filter=/c/${lang}&limit=${max}`;
+  const r = await fetch(url); const data = await r.json();
+  let raw = (data.related||[])
+    .map(x => (x['@id']||'').split('/').pop())
+    .filter(Boolean);
+
+  // 전처리: 길이/문자/금칙어 필터
+  raw = raw.filter(w => {
+    if(!w) return false;
+    if(containsBadWord(w)) return false;
+    const nw = normalizeWord(w);
+    if(nw.length < 2 || nw.length > 10) return false;
+    if(/[^A-Za-z가-힣0-9]/.test(nw)) return false;
+    return true;
+  });
+
+  // 유니크 + 주제 제거
+  const uniq = [...new Set(raw)].filter(w => w !== topic);
+  // 상위 60개에서 퍼즐 가능한 20개 이하로 후에 추림
+  const candidates = uniq.map(w => ({word: normalizeWord(w), clue: `${w.length}글자`}));
+  // 힌트 고도화 시도(위키 요약) — 실패해도 무시
+  await enrichHints(candidates.slice(0, 35), lang);
+  return candidates;
+}
+async function enrichHints(list, lang){
+  // ko 우선 → 실패 시 en
+  for(const item of list){
+    try{
+      const w = item.word;
+      const q = encodeURIComponent(w);
+      let url = `https://ko.wikipedia.org/api/rest_v1/page/summary/${q}`;
+      let res = await fetch(url); 
+      if(!res.ok) { // ko 실패 → en
+        url = `https://en.wikipedia.org/api/rest_v1/page/summary/${q}`;
+        res = await fetch(url);
+      }
+      if(res.ok){
+        const j = await res.json();
+        const txt = (j.extract||'').trim();
+        if(txt){
+          // 너무 길면 한두 문장으로
+          const one = txt.split(/[.!?。]\s/).slice(0,2).join('. ');
+          item.clue = one.length>120 ? one.slice(0,117)+'…' : one;
+        }
+      }
+    }catch(e){/* ignore */}
+  }
+}
+
+/* ===== 퍼즐 배치(그리디) ===== */
+function resetGrid(){
+  GRID = Array.from({length:SIZE},()=>Array(SIZE).fill('#'));
+  numbers = Array.from({length:SIZE},()=>Array(SIZE).fill(null));
+}
+function numberGrid(){
+  let n=1;
+  for(let r=0;r<SIZE;r++){
+    for(let c=0;c<SIZE;c++){
+      if(GRID[r][c]==='#') continue;
+      const startAcross = (c===0 || GRID[r][c-1]==='#') && (c+1<SIZE);
+      const startDown   = (r===0 || GRID[r-1][c]==='#') && (r+1<SIZE);
+      if(startAcross || startDown) numbers[r][c]=n++;
+    }
+  }
+}
+function writeWord(word,r,c,dir){
+  if(dir==='across'){ for(let i=0;i<word.length;i++) GRID[r][c+i]=word[i]; }
+  else{ for(let i=0;i<word.length;i++) GRID[r+i][c]=word[i]; }
+}
+function placeFits(word, r, c, dir){
+  if(dir==='across'){
+    if(c<0 || c+word.length>SIZE || r<0 || r>=SIZE) return false;
+    for(let i=0;i<word.length;i++){
+      const ch = GRID[r][c+i];
+      if(ch!=='#' && ch!==word[i]) return false;
+      if(i===0 && c-1>=0 && GRID[r][c-1]!=='#') return false;
+      if(i===word.length-1 && c+word.length<SIZE && GRID[r][c+word.length]!=='#') return false;
+      if(r-1>=0 && GRID[r-1][c+i]!=='#' && GRID[r-1][c+i]!==word[i]) return false;
+      if(r+1<SIZE && GRID[r+1][c+i]!=='#' && GRID[r+1][c+i]!==word[i]) return false;
+    }
+    return true;
+  }else{
+    if(r<0 || r+word.length>SIZE || c<0 || c>=SIZE) return false;
+    for(let i=0;i<word.length;i++){
+      const ch = GRID[r+i][c];
+      if(ch!=='#' && ch!==word[i]) return false;
+      if(i===0 && r-1>=0 && GRID[r-1][c]!=='#') return false;
+      if(i===word.length-1 && r+word.length<SIZE && GRID[r+word.length][c]!=='#') return false;
+      if(c-1>=0 && GRID[r+i][c-1]!=='#' && GRID[r+i][c-1]!==word[i]) return false;
+      if(c+1<SIZE && GRID[r+i][c+1]!=='#' && GRID[r+i][c+1]!==word[i]) return false;
+    }
+    return true;
+  }
+}
+function buildCrossword(words){
+  resetGrid();
+  words = [...words].sort((a,b)=> b.word.length - a.word.length);
+  let placed = [];
+
+  // 첫 단어 중앙 가로
+  const first = words.shift();
+  if(!first) return placed;
+  const r0 = Math.floor(SIZE/2);
+  const c0 = Math.max(0, Math.floor((SIZE - first.word.length)/2));
+  writeWord(first.word, r0, c0, 'across');
+  first._placed = {word:first.word,row:r0,col:c0,dir:'across',clue:first.clue};
+  placed.push(first._placed);
+
+  // 나머지 배치 — 교차 우선 → 빈칸 스캔
+  outer:
+  for(const w of words){
+    // 목표 개수 달성 시 중단
+    if(placed.length >= MAX_WORDS) break;
+    // 교차
+    for(const p of placed){
+      for(let i=0;i<p.word.length;i++){
+        const ch = p.word[i];
+        for(let j=0;j<w.word.length;j++){
+          if(w.word[j]!==ch) continue;
+          if(p.dir==='across'){
+            const r = p.row - j, c = p.col + i;
+            if(placeFits(w.word,r,c,'down')){
+              writeWord(w.word,r,c,'down');
+              w._placed = {word:w.word,row:r,col:c,dir:'down',clue:w.clue};
+              placed.push(w._placed);
+              continue outer;
+            }
+          }else{
+            const r = p.row + i, c = p.col - j;
+            if(placeFits(w.word,r,c,'across')){
+              writeWord(w.word,r,c,'across');
+              w._placed = {word:w.word,row:r,col:c,dir:'across',clue:w.clue};
+              placed.push(w._placed);
+              continue outer;
+            }
+          }
+        }
+      }
+    }
+    // 빈 영역 스캔
+    for(let r=0;r<SIZE;r++){
+      for(let c=0;c<SIZE;c++){
+        if(placeFits(w.word,r,c,'across')){
+          writeWord(w.word,r,c,'across');
+          w._placed = {word:w.word,row:r,col:c,dir:'across',clue:w.clue};
+          placed.push(w._placed);
+          continue outer;
+        }
+        if(placeFits(w.word,r,c,'down')){
+          writeWord(w.word,r,c,'down');
+          w._placed = {word:w.word,row:r,col:c,dir:'down',clue:w.clue};
+          placed.push(w._placed);
+          continue outer;
+        }
+      }
+    }
+  }
+
+  numberGrid();
+  return placed;
+}
+
+/* ===== 렌더링/입력 ===== */
+function render(){
+  const board = document.getElementById('board');
+  board.style.gridTemplateColumns = `repeat(${SIZE}, var(--size))`;
+  board.innerHTML='';
+  for(let r=0;r<SIZE;r++){
+    for(let c=0;c<SIZE;c++){
+      const cell = document.createElement('div');
+      cell.id = id(r,c);
+      const block = GRID[r][c]==='#';
+      cell.className = 'cell' + (block?' block':'');
+      if(!block){
+        const num = numbers[r][c];
+        if(num){ const t=document.createElement('div'); t.className='num'; t.textContent=num; cell.appendChild(t); }
+        const inp=document.createElement('input');
+        inp.maxLength=1; inp.dataset.r=r; inp.dataset.c=c;
+        inp.value = getValue(r,c);
+        inp.addEventListener('input', e=>{
+          e.target.value = e.target.value.slice(0,1);
+          pushValue(r,c,e.target.value);
+          moveNext(r,c);
+          updateProgress();
+        });
+        inp.addEventListener('keydown', e=>{
+          if(e.key===' '||e.key==='Tab'){ e.preventDefault(); toggleDir(); }
+          if(e.key==='Enter'){ e.preventDefault(); nextWord(); }
+          if(/^Arrow/.test(e.key)){
+            e.preventDefault();
+            const map={ArrowLeft:[0,-1],ArrowRight:[0,1],ArrowUp:[-1,0],ArrowDown:[1,0]};
+            const d=map[e.key], nr=r+d[0], nc=c+d[1];
+            if(inBounds(nr,nc) && GRID[nr][nc]!=='#') focusCell(nr,nc,true);
+          }
+          if(e.key==='Backspace' && !e.target.value){
+            const prev = prevCell(r,c);
+            if(prev){ focusCell(prev.r,prev.c); pushValue(prev.r,prev.c,""); }
+          }
+        });
+        cell.addEventListener('click', ()=> focusCell(r,c,true));
+        cell.appendChild(inp);
+      }
+      board.appendChild(cell);
+    }
+  }
+  focusFirst();
+  renderHints();
+}
+function renderHints(){
+  const list = document.getElementById('hints'); list.innerHTML='';
+  const across = WORDS.filter(w=>w._placed && w._placed.dir==='across');
+  const down   = WORDS.filter(w=>w._placed && w._placed.dir==='down');
+  across.sort((a,b)=> numbers[a._placed?.row||a.row][a._placed?.col||a.col] - numbers[b._placed?.row||b.row][b._placed?.col||b.col]);
+  down.sort((a,b)=> numbers[a._placed?.row||a.row][a._placed?.col||a.col] - numbers[b._placed?.row||b.row][b._placed?.col||b.col]);
+  list.insertAdjacentHTML('beforeend','<strong>가로</strong>');
+  for(const e of across){
+    const n = numbers[e.row][e.col]||'?';
+    list.insertAdjacentHTML('beforeend', `<li>${n}. ${escapeHtml(e.clue||'힌트 없음')}</li>`);
+  }
+  list.insertAdjacentHTML('beforeend','<strong>세로</strong>');
+  for(const e of down){
+    const n = numbers[e.row][e.col]||'?';
+    list.insertAdjacentHTML('beforeend', `<li>${n}. ${escapeHtml(e.clue||'힌트 없음')}</li>`);
+  }
+}
+function escapeHtml(s){ return (s||'').replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m])); }
+
+function focusFirst(){
+  for(let r=0;r<SIZE;r++) for(let c=0;c<SIZE;c++){
+    if(GRID[r][c]!=='#'){ focusCell(r,c); return; }
+  }
+}
+function getEntryAt(r,c,dir){
+  if(GRID[r][c]==='#') return null;
+  let sr=r, sc=c, len=1;
+  if(dir==='across'){
+    while(sc-1>=0 && GRID[sr][sc-1]!=='#') sc--;
+    let e=sc; while(e+1<SIZE && GRID[sr][e+1]!=='#') e++;
+    len=e-sc+1;
+  }else{
+    while(sr-1>=0 && GRID[sr-1][sc]!=='#') sr--;
+    let e=sr; while(e+1<SIZE && GRID[e+1][sc]!=='#') e++;
+    len=e-sr+1;
+  }
+  return {row:sr,col:sc,len};
+}
+function highlightWord(){
+  document.querySelectorAll('.cell').forEach(el=>el.classList.remove('word'));
+  const ent = getEntryAt(current.r,current.c,direction);
+  if(!ent) return;
+  for(let i=0;i<ent.len;i++){
+    const r = direction==='across'? ent.row : ent.row+i;
+    const c = direction==='across'? ent.col+i : ent.col;
+    const el = document.getElementById(id(r,c));
+    el && el.classList.add('word');
+  }
+}
+function focusCell(r,c,autoSwitch=false){
+  current={r,c};
+  document.querySelectorAll('.cell').forEach(el=>el.classList.remove('active','word','bad'));
+  const el = document.getElementById(id(r,c));
+  if(!el) return;
+  el.classList.add('active');
+  const entry = getEntryAt(r,c,direction);
+  if(!entry && autoSwitch) direction = (direction==='across'?'down':'across');
+  highlightWord();
+  const inp = el.querySelector('input'); if(inp){ inp.focus(); inp.select(); }
+  document.getElementById('dirPill').textContent = `방향: ${direction==='across'?'가로':'세로'}`;
+}
+function toggleDir(){ direction = direction==='across'?'down':'across'; document.getElementById('dirPill').textContent = `방향: ${direction==='across'?'가로':'세로'}`; highlightWord(); }
+function moveNext(r,c){
+  const d = direction==='across'?[0,1]:[1,0];
+  const nr=r+d[0], nc=c+d[1];
+  if(inBounds(nr,nc) && GRID[nr][nc]!=='#') focusCell(nr,nc);
+}
+function prevCell(r,c){
+  const d = direction==='across'?[0,-1]:[-1,0];
+  const nr=r+d[0], nc=c+d[1];
+  if(inBounds(nr,nc) && GRID[nr][nc]!=='#') return {r:nr,c:nc};
+  return null;
+}
+function checkCurrent(){
+  document.querySelectorAll('.cell').forEach(el=>el.classList.remove('bad'));
+  const ent = getEntryAt(current.r,current.c,direction); if(!ent) return;
+  for(let i=0;i<ent.len;i++){
+    const r = direction==='across'? ent.row : ent.row+i;
+    const c = direction==='across'? ent.col+i : ent.col;
+    const val = (document.getElementById(id(r,c)).querySelector('input')?.value||'').toUpperCase();
+    const ans = GRID[r][c].toUpperCase();
+    if(val && val!==ans) document.getElementById(id(r,c)).classList.add('bad');
+  }
+}
+function revealCurrent(){
+  const ent = getEntryAt(current.r,current.c,direction); if(!ent) return;
+  for(let i=0;i<ent.len;i++){
+    const r = direction==='across'? ent.row : ent.row+i;
+    const c = direction==='across'? ent.col+i : ent.col;
+    pushValue(r,c, GRID[r][c]);
+  }
+}
+function nextWord(){
+  let starts=[];
+  for(let r=0;r<SIZE;r++) for(let c=0;c<SIZE;c++){
+    if(numbers[r][c]) starts.push({r,c});
+  }
+  starts.sort((a,b)=> numbers[a.r][a.c]-numbers[b.r][b.c]);
+  let idx = starts.findIndex(s=> s.r===current.r && s.c===current.c);
+  idx = (idx+1) % starts.length;
+  focusCell(starts[idx].r, starts[idx].c);
+}
+
+/* ===== 진행도/타이머/랭킹 ===== */
+function startTimer(){
+  if(timerId) clearInterval(timerId);
+  startAt = now();
+  timerId = setInterval(()=>{
+    const secs = (now()-startAt)/1000;
+    document.getElementById('timer').textContent = secToMMSS(secs);
+  }, 300);
+}
+function updateProgress(){
+  // 정답 GRID와 비교
+  let total=0, correct=0, filled=0;
+  for(let r=0;r<SIZE;r++) for(let c=0;c<SIZE;c++){
+    if(GRID[r][c]==='#') continue;
+    total++;
+    const val = (document.getElementById(id(r,c)).querySelector('input')?.value||'').toUpperCase();
+    if(val) filled++;
+    if(val===GRID[r][c].toUpperCase()) correct++;
+  }
+  const pct = Math.round(100*correct/total);
+  document.getElementById('prog').value = pct;
+  document.getElementById('progTxt').textContent = `진행 ${pct}%`;
+  if(ROOM && db && NICK){
+    db.ref(`${roomPath()}/stats/${encode(NICK)}`).set({
+      nick:NICK, progress:pct, updatedAt: now()
+    });
+    if(pct===100){
+      // 완료 시간 최초 기록
+      db.ref(`${roomPath()}/finish/${encode(NICK)}`).get().then(s=>{
+        if(!s.exists()){
+          db.ref(`${roomPath()}/finish/${encode(NICK)}`).set({ finishedAt: now(), nick:NICK });
+        }
+      });
+    }
+  }
+}
+function bindRanking(){
+  if(!ROOM||!db) return;
+  // 완료 시간 랭킹
+  db.ref(`${roomPath()}/finish`).on('value', snap=>{
+    const tbody = document.getElementById('rank');
+    const arr = [];
+    const val = snap.val()||{};
+    for(const k in val){
+      arr.push({nick:val[k].nick, finishedAt: val[k].finishedAt});
+    }
+    arr.sort((a,b)=> a.finishedAt - b.finishedAt);
+    tbody.innerHTML='';
+    arr.forEach((r,i)=>{
+      // 해당 시점의 진행도도 옆에 표시
+      db.ref(`${roomPath()}/stats/${encode(r.nick)}`).get().then(s=>{
+        const prog = s.exists()? (s.val().progress||0) : 0;
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${i+1}</td><td>${r.nick}</td><td>${secToMMSS((r.finishedAt-(startAt||r.finishedAt))/1000)}</td><td>${prog}%</td>`;
+        tbody.appendChild(tr);
+      });
+    });
+  });
+}
+
+/* ===== 멀티플레이 동기화 ===== */
+function initFirebase(){ if(db) return; const app=firebase.initializeApp(firebaseConfig); db=firebase.database(); }
+function roomPath(){ return `rooms/${ROOM}`; }
+function encode(s){ return encodeURIComponent(s).replace(/\./g, '%2E'); }
+
+function pushValue(r,c,val){
+  if(!ROOM || !db) return;
+  db.ref(`${roomPath()}/grid/${r}_${c}`).set((val||"").toUpperCase());
+}
+function getValue(r,c){ return ""; } // 초기 렌더는 공란
+
+function bindRoom(){
+  if(!ROOM || !db) return;
+  // 퍼즐 공유 정보
+  db.ref(`${roomPath()}/meta`).on('value', snap=>{
+    // seed/meta가 바뀌면 재생성하도록 할 수도 있음 (여기선 생략)
+  });
+  // 입력 동기화
+  db.ref(`${roomPath()}/grid`).on('value', snap=>{
+    const obj = snap.val()||{};
+    for(const k in obj){
+      const [r,c] = k.split('_').map(Number);
+      const el = document.getElementById(id(r,c))?.querySelector('input');
+      if(el && el.value !== obj[k]){ el.value = obj[k] || ""; }
+    }
+    updateProgress();
+  });
+  // 참석자 프레즌스
+  const conRef = db.ref('.info/connected');
+  conRef.on('value', (snap) => {
+    if (snap.val() === true) {
+      const pRef = db.ref(`${roomPath()}/presence`).push(true);
+      presenceRef = pRef; pRef.onDisconnect().remove();
+    }
+  });
+  db.ref(`${roomPath()}/presence`).on('value', snap=>{
+    const obj = snap.val()||{};
+    document.getElementById('peers').textContent = `참여자: ${Object.keys(obj).length}`;
+  });
+  bindRanking();
+}
+
+/* ===== 이벤트 ===== */
+document.getElementById('createRoom').addEventListener('click', ()=>{
+  initFirebase();
+  NICK = document.getElementById('nick').value.trim() || `user-${Math.random().toString(36).slice(2,6)}`;
+  ROOM = document.getElementById('room').value.trim();
+  if(!ROOM){ alert('방코드를 입력하세요'); return; }
+  db.ref(`${roomPath()}/meta`).set({ createdAt: now(), createdBy: NICK });
+  document.getElementById('roomInfo').textContent = `방: ${ROOM}`;
+  bindRoom();
+});
+document.getElementById('joinRoom').addEventListener('click', ()=>{
+  initFirebase();
+  NICK = document.getElementById('nick').value.trim() || `user-${Math.random().toString(36).slice(2,6)}`;
+  ROOM = document.getElementById('room').value.trim();
+  if(!ROOM){ alert('방코드를 입력하세요'); return; }
+  document.getElementById('roomInfo').textContent = `방: ${ROOM}`;
+  bindRoom();
+});
+
+document.getElementById('fetchWords').addEventListener('click', async ()=>{
+  const topic = document.getElementById('topic').value.trim();
+  if(!topic){ alert('주제를 입력하세요'); return; }
+  setStatus('연관 단어 수집 및 힌트 고도화 중…');
+  try{
+    let cand = await fetchRelatedWords(topic, 60);
+    // 너무 많은 경우 상위 길이 위주로 섞어서 28개 정도로 압축
+    cand = cand.sort((a,b)=> b.word.length - a.word.length).slice(0,28);
+    // 금칙/중복 이중 체크
+    cand = cand.filter(x=>!containsBadWord(x.word));
+    WORDS = cand;
+    setStatus(`단어 ${WORDS.length}개 준비 완료. [퍼즐 생성]을 누르세요.`);
+  }catch(e){
+    console.error(e); setStatus('단어 수집 실패'); alert('네트워크/API 오류');
+  }
+});
+
+document.getElementById('build').addEventListener('click', ()=>{
+  if(!WORDS || WORDS.length===0){ alert('먼저 단어를 가져오세요.'); return; }
+  // 목표 20개 정도로 맞추기 위해 우선 24개로 시도 → 배치 후 placed 길이에 맞춤
+  const pool = [...WORDS].slice(0, 24);
+  pool.forEach(w=> delete w._placed);
+  const placed = buildCrossword(pool);
+  // 배치 후 실제 배치된 것만 WORDS로 유지
+  WORDS = pool.filter(w=> w._placed).slice(0, MAX_WORDS);
+  setStatus(`퍼즐 생성 완료: 실제 배치 ${WORDS.length}개`);
+  render();
+  startTimer();
+  updateProgress();
+  if(ROOM && db && NICK){
+    db.ref(`${roomPath()}/stats/${encode(NICK)}`).set({nick:NICK, progress:0, updatedAt: now()});
+  }
+});
+
+document.getElementById('check').addEventListener('click', ()=> checkCurrent());
+document.getElementById('reveal').addEventListener('click', ()=> revealCurrent());
+
+/* ===== 초기 도움 ===== */
+document.getElementById('dirPill').textContent = `방향: ${direction==='across'?'가로':'세로'}`;
+
+/* ===== 보조 ===== */
+function nextWord() {
+  let starts=[];
+  for(let r=0;r<SIZE;r++) for(let c=0;c<SIZE;c++){
+    if(numbers[r][c]) starts.push({r,c});
+  }
+  starts.sort((a,b)=> numbers[a.r][a.c]-numbers[b.r][b.c]);
+  let idx = starts.findIndex(s=> s.r===current.r && s.c===current.c);
+  idx = (idx+1) % starts.length;
+  focusCell(starts[idx].r, starts[idx].c);
+}
+
+/* ===== 끝 ===== */
+</script>
+</body>
+</html>
