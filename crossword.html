@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>주제기반 실시간 크로스워드 15x15 (힌트·필터·타이머·랭킹)</title>
+<title>주제기반 실시간 크로스워드 15×15 (Canva 임베드용)</title>
 <style>
   :root{ --size:40px; --gap:2px; --accent:#2563eb; --ink:#0f172a; --muted:#64748b; --bad:#ef4444; --ok:#10b981; }
   body{font-family:system-ui,Segoe UI,Roboto,"Noto Sans KR",sans-serif; margin:0; background:#f8fafc; color:var(--ink)}
@@ -26,7 +26,6 @@
   .cell.active{outline:2px solid var(--accent)}
   .cell.word{box-shadow: inset 0 0 0 2px rgba(37,99,235,.25)}
   small{color:var(--muted)}
-  .side h3{margin:6px 0 4px; font-size:14px}
   .hintlist{font-size:13px; line-height:1.45; max-height:260px; overflow:auto; border:1px dashed #e5e7eb; border-radius:10px; padding:8px}
   .hintlist li{margin:2px 0}
   .meters{display:flex; gap:8px; flex-wrap:wrap; margin:8px 0}
@@ -35,17 +34,18 @@
   th,td{border-bottom:1px solid #e5e7eb; padding:6px 4px; text-align:left}
   .ok{color:var(--ok)}
   .bad{background:#fee2e2}
+  .muted{color:#94a3b8}
 </style>
 </head>
 <body>
 <header>
   <h1>주제기반 실시간 크로스워드 15×15</h1>
   <div class="row">
-    <input id="nick" type="text" placeholder="닉네임" style="min-width:120px"/>
+    <input id="nick" type="text" placeholder="닉네임(멀티용)" style="min-width:120px"/>
     <input id="room" type="text" placeholder="방코드(예: 6-2-금요일)" />
     <button id="createRoom">방 생성</button>
     <button id="joinRoom" class="primary">방 접속</button>
-    <span class="pill" id="roomInfo">방 미연결</span>
+    <span class="pill" id="roomInfo">방: 미연결(싱글모드)</span>
     <span class="pill" id="peers">참여자: 0</span>
   </div>
 </header>
@@ -73,21 +73,23 @@
   <aside class="side">
     <h3>힌트(자동 고도화)</h3>
     <ol id="hints" class="hintlist"></ol>
-
     <h3>랭킹(완료 시간)</h3>
     <table>
       <thead><tr><th>순위</th><th>닉네임</th><th>시간</th><th>진행</th></tr></thead>
-      <tbody id="rank"></tbody>
+      <tbody id="rank"><tr><td colspan="4" class="muted">싱글모드에서는 랭킹이 비활성화됩니다.</td></tr></tbody>
     </table>
   </aside>
 </div>
 
-<!-- Firebase -->
+<!-- Firebase (멀티플레이/랭킹용, 없으면 자동 싱글모드) -->
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
 
 <script>
-/* =========== Firebase 설정 (교체하세요) =========== */
+/* =========== Firebase 설정 (선택) ===========
+   ▶ 멀티/랭킹을 쓰려면 아래를 "네 프로젝트 값"으로 교체
+   ▶ 교체 안 해도 싱글모드로 정상 작동
+*/
 const firebaseConfig = {
   apiKey: "YOUR_API_KEY",
   authDomain: "YOUR-PROJECT.firebaseapp.com",
@@ -97,16 +99,20 @@ const firebaseConfig = {
   messagingSenderId: "1234567890",
   appId: "YOUR_APP_ID"
 };
-/* ================================================= */
+/* =========================================== */
+
+let MULTI_ENABLED = true;
+for (const k of ["apiKey","authDomain","databaseURL","projectId","appId"]){
+  if(!firebaseConfig[k] || String(firebaseConfig[k]).includes("YOUR_") || String(firebaseConfig[k]).includes("YOUR-")){
+    MULTI_ENABLED = false; break;
+  }
+}
 
 /* ===== 기본 상수/상태 ===== */
 const SIZE = 15;
 const MAX_WORDS = 20; // 가로+세로 합산 목표
-const BADWORDS = [
-  // 매우 보수적으로: 과격/외설/비하/정치적 민감어 등 수업용 금칙어
-  "시발","씨발","병신","병맛","개새","좆","sex","porn","fuck","shit","bitch","nazi",
-  "죽여","자살","폭탄","테러","마약","음란","혐오"
-];
+const BADWORDS = ["시발","씨발","병신","병맛","개새","좆","sex","porn","fuck","shit","bitch","nazi","죽여","자살","폭탄","테러","마약","음란","혐오"];
+
 let GRID = Array.from({length:SIZE},()=>Array(SIZE).fill('#'));
 let numbers = Array.from({length:SIZE},()=>Array(SIZE).fill(null));
 let direction = 'across';
@@ -121,78 +127,96 @@ const setStatus = t => document.getElementById('status').textContent=t;
 const inBounds = (r,c)=> r>=0 && c>=0 && r<SIZE && c<SIZE;
 const id = (r,c)=> `r${r}c${c}`;
 const now = ()=> Date.now();
-const secToMMSS = s => {
-  const m = Math.floor(s/60).toString().padStart(2,'0');
-  const ss = Math.floor(s%60).toString().padStart(2,'0');
-  return `${m}:${ss}`;
-};
-function containsBadWord(s){
-  const lower = s.toLowerCase();
-  return BADWORDS.some(b => lower.includes(b));
-}
-function normalizeWord(w){
-  return /[ㄱ-ㅎㅏ-ㅣ가-힣]/.test(w) ? w.replace(/\s|-/g,'') : w.replace(/\s|-/g,'').toUpperCase();
-}
+const secToMMSS = s => { const m=Math.floor(s/60).toString().padStart(2,'0'); const ss=Math.floor(s%60).toString().padStart(2,'0'); return `${m}:${ss}`; };
+function containsBadWord(s){ const lower = (s||"").toLowerCase(); return BADWORDS.some(b => lower.includes(b)); }
+function normalizeWord(w){ const base=(w||"").replace(/\s|-/g,''); return /[가-힣]/.test(base) ? base : base.toUpperCase(); }
+function escapeHtml(s){ return (s||'').replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m])); }
 
-/* ===== 연관어 수집 + 금칙어 필터 + 힌트 고도화 ===== */
+/* ===== 단어 수집(폴백 포함) + 힌트 고도화 ===== */
 async function fetchRelatedWords(topic, max=60){
   const isKo = /[가-힣]/.test(topic);
-  const lang = isKo ? 'ko' : 'en';
   const enc = encodeURIComponent;
-  const url = `https://api.conceptnet.io/related/c/${lang}/${enc(topic)}?filter=/c/${lang}&limit=${max}`;
-  const r = await fetch(url); const data = await r.json();
-  let raw = (data.related||[])
-    .map(x => (x['@id']||'').split('/').pop())
-    .filter(Boolean);
+  const cleanup = (arr)=> {
+    const uniq = []; const seen = new Set();
+    for (let w of arr){
+      if(!w) continue;
+      if(containsBadWord(w)) continue;
+      const nw = normalizeWord(w);
+      if(nw.length < 2 || nw.length > 12) continue;
+      if(/[^A-Za-z가-힣0-9]/.test(nw)) continue;
+      if(seen.has(nw)) continue;
+      seen.add(nw); uniq.push({word:nw, clue:`${nw.length}글자`});
+    }
+    return uniq.slice(0, max);
+  };
 
-  // 전처리: 길이/문자/금칙어 필터
-  raw = raw.filter(w => {
-    if(!w) return false;
-    if(containsBadWord(w)) return false;
-    const nw = normalizeWord(w);
-    if(nw.length < 2 || nw.length > 10) return false;
-    if(/[^A-Za-z가-힣0-9]/.test(nw)) return false;
-    return true;
-  });
+  // 1) ConceptNet
+  try{
+    const lang = isKo ? 'ko' : 'en';
+    const url = `https://api.conceptnet.io/related/c/${lang}/${enc(topic)}?filter=/c/${lang}&limit=${max}`;
+    const r = await fetch(url, {mode:'cors'});
+    if(r.ok){
+      const data = await r.json();
+      const list = (data.related||[]).map(x => (x['@id']||'').split('/').pop());
+      let cand = cleanup(list);
+      if(cand.length >= 10){ await enrichHints(cand.slice(0, 30), lang); return cand; }
+    }
+  }catch(e){}
 
-  // 유니크 + 주제 제거
-  const uniq = [...new Set(raw)].filter(w => w !== topic);
-  // 상위 60개에서 퍼즐 가능한 20개 이하로 후에 추림
-  const candidates = uniq.map(w => ({word: normalizeWord(w), clue: `${w.length}글자`}));
-  // 힌트 고도화 시도(위키 요약) — 실패해도 무시
-  await enrichHints(candidates.slice(0, 35), lang);
-  return candidates;
+  // 2) Wikipedia OpenSearch (CORS 허용)
+  try{
+    const lang = isKo ? 'ko' : 'en';
+    const url = `https://${lang}.wikipedia.org/w/api.php?action=opensearch&search=${enc(topic)}&limit=${max}&namespace=0&format=json&origin=*`;
+    const r = await fetch(url);
+    if(r.ok){
+      const j = await r.json();
+      let cand = cleanup(j[1] || []);
+      if(cand.length >= 10){ await enrichHints(cand.slice(0, 30), lang); return cand; }
+    }
+  }catch(e){}
+
+  // 3) Datamuse (영문)
+  try{
+    const url = `https://api.datamuse.com/words?ml=${enc(topic)}&max=${max}`;
+    const r = await fetch(url, {mode:'cors'});
+    if(r.ok){
+      const j = await r.json();
+      let cand = cleanup(j.map(o=>o.word));
+      await enrichHints(cand.slice(0, 30), 'en');
+      return cand;
+    }
+  }catch(e){}
+
+  // 4) 최후 폴백
+  const seed = [topic, topic+'학', topic+'상식', topic+'기초', topic+'관련'];
+  return cleanup(seed);
 }
+
 async function enrichHints(list, lang){
-  // ko 우선 → 실패 시 en
   for(const item of list){
     try{
-      const w = item.word;
-      const q = encodeURIComponent(w);
-      let url = `https://ko.wikipedia.org/api/rest_v1/page/summary/${q}`;
-      let res = await fetch(url); 
-      if(!res.ok) { // ko 실패 → en
-        url = `https://en.wikipedia.org/api/rest_v1/page/summary/${q}`;
+      const q = encodeURIComponent(item.word);
+      let url = `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${q}`;
+      let res = await fetch(url);
+      if(!res.ok){
+        const alt = lang === 'ko' ? 'en' : 'ko';
+        url = `https://${alt}.wikipedia.org/api/rest_v1/page/summary/${q}`;
         res = await fetch(url);
       }
       if(res.ok){
         const j = await res.json();
         const txt = (j.extract||'').trim();
         if(txt){
-          // 너무 길면 한두 문장으로
-          const one = txt.split(/[.!?。]\s/).slice(0,2).join('. ');
-          item.clue = one.length>120 ? one.slice(0,117)+'…' : one;
+          const sent = txt.split(/[.!?。]\s/).slice(0,2).join('. ');
+          item.clue = sent.length>140 ? sent.slice(0,137)+'…' : sent;
         }
       }
-    }catch(e){/* ignore */}
+    }catch(e){}
   }
 }
 
 /* ===== 퍼즐 배치(그리디) ===== */
-function resetGrid(){
-  GRID = Array.from({length:SIZE},()=>Array(SIZE).fill('#'));
-  numbers = Array.from({length:SIZE},()=>Array(SIZE).fill(null));
-}
+function resetGrid(){ GRID = Array.from({length:SIZE},()=>Array(SIZE).fill('#')); numbers = Array.from({length:SIZE},()=>Array(SIZE).fill(null)); }
 function numberGrid(){
   let n=1;
   for(let r=0;r<SIZE;r++){
@@ -204,10 +228,7 @@ function numberGrid(){
     }
   }
 }
-function writeWord(word,r,c,dir){
-  if(dir==='across'){ for(let i=0;i<word.length;i++) GRID[r][c+i]=word[i]; }
-  else{ for(let i=0;i<word.length;i++) GRID[r+i][c]=word[i]; }
-}
+function writeWord(word,r,c,dir){ if(dir==='across'){ for(let i=0;i<word.length;i++) GRID[r][c+i]=word[i]; } else { for(let i=0;i<word.length;i++) GRID[r+i][c]=word[i]; } }
 function placeFits(word, r, c, dir){
   if(dir==='across'){
     if(c<0 || c+word.length>SIZE || r<0 || r>=SIZE) return false;
@@ -238,7 +259,6 @@ function buildCrossword(words){
   words = [...words].sort((a,b)=> b.word.length - a.word.length);
   let placed = [];
 
-  // 첫 단어 중앙 가로
   const first = words.shift();
   if(!first) return placed;
   const r0 = Math.floor(SIZE/2);
@@ -247,12 +267,9 @@ function buildCrossword(words){
   first._placed = {word:first.word,row:r0,col:c0,dir:'across',clue:first.clue};
   placed.push(first._placed);
 
-  // 나머지 배치 — 교차 우선 → 빈칸 스캔
   outer:
   for(const w of words){
-    // 목표 개수 달성 시 중단
     if(placed.length >= MAX_WORDS) break;
-    // 교차
     for(const p of placed){
       for(let i=0;i<p.word.length;i++){
         const ch = p.word[i];
@@ -278,7 +295,6 @@ function buildCrossword(words){
         }
       }
     }
-    // 빈 영역 스캔
     for(let r=0;r<SIZE;r++){
       for(let c=0;c<SIZE;c++){
         if(placeFits(w.word,r,c,'across')){
@@ -296,7 +312,6 @@ function buildCrossword(words){
       }
     }
   }
-
   numberGrid();
   return placed;
 }
@@ -351,26 +366,14 @@ function renderHints(){
   const list = document.getElementById('hints'); list.innerHTML='';
   const across = WORDS.filter(w=>w._placed && w._placed.dir==='across');
   const down   = WORDS.filter(w=>w._placed && w._placed.dir==='down');
-  across.sort((a,b)=> numbers[a._placed?.row||a.row][a._placed?.col||a.col] - numbers[b._placed?.row||b.row][b._placed?.col||b.col]);
-  down.sort((a,b)=> numbers[a._placed?.row||a.row][a._placed?.col||a.col] - numbers[b._placed?.row||b.row][b._placed?.col||b.col]);
+  across.sort((a,b)=> numbers[a._placed.row][a._placed.col] - numbers[b._placed.row][b._placed.col]);
+  down.sort((a,b)=> numbers[a._placed.row][a._placed.col] - numbers[b._placed.row][b._placed.col]);
   list.insertAdjacentHTML('beforeend','<strong>가로</strong>');
-  for(const e of across){
-    const n = numbers[e.row][e.col]||'?';
-    list.insertAdjacentHTML('beforeend', `<li>${n}. ${escapeHtml(e.clue||'힌트 없음')}</li>`);
-  }
+  for(const e of across){ const n = numbers[e.row][e.col]||'?'; list.insertAdjacentHTML('beforeend', `<li>${n}. ${escapeHtml(e.clue||'힌트 없음')}</li>`); }
   list.insertAdjacentHTML('beforeend','<strong>세로</strong>');
-  for(const e of down){
-    const n = numbers[e.row][e.col]||'?';
-    list.insertAdjacentHTML('beforeend', `<li>${n}. ${escapeHtml(e.clue||'힌트 없음')}</li>`);
-  }
+  for(const e of down){ const n = numbers[e.row][e.col]||'?'; list.insertAdjacentHTML('beforeend', `<li>${n}. ${escapeHtml(e.clue||'힌트 없음')}</li>`); }
 }
-function escapeHtml(s){ return (s||'').replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m])); }
-
-function focusFirst(){
-  for(let r=0;r<SIZE;r++) for(let c=0;c<SIZE;c++){
-    if(GRID[r][c]!=='#'){ focusCell(r,c); return; }
-  }
-}
+function focusFirst(){ for(let r=0;r<SIZE;r++) for(let c=0;c<SIZE;c++){ if(GRID[r][c]!=='#'){ focusCell(r,c); return; } } }
 function getEntryAt(r,c,dir){
   if(GRID[r][c]==='#') return null;
   let sr=r, sc=c, len=1;
@@ -409,17 +412,8 @@ function focusCell(r,c,autoSwitch=false){
   document.getElementById('dirPill').textContent = `방향: ${direction==='across'?'가로':'세로'}`;
 }
 function toggleDir(){ direction = direction==='across'?'down':'across'; document.getElementById('dirPill').textContent = `방향: ${direction==='across'?'가로':'세로'}`; highlightWord(); }
-function moveNext(r,c){
-  const d = direction==='across'?[0,1]:[1,0];
-  const nr=r+d[0], nc=c+d[1];
-  if(inBounds(nr,nc) && GRID[nr][nc]!=='#') focusCell(nr,nc);
-}
-function prevCell(r,c){
-  const d = direction==='across'?[0,-1]:[-1,0];
-  const nr=r+d[0], nc=c+d[1];
-  if(inBounds(nr,nc) && GRID[nr][nc]!=='#') return {r:nr,c:nc};
-  return null;
-}
+function moveNext(r,c){ const d = direction==='across'?[0,1]:[1,0]; const nr=r+d[0], nc=c+d[1]; if(inBounds(nr,nc) && GRID[nr][nc]!=='#') focusCell(nr,nc); }
+function prevCell(r,c){ const d = direction==='across'?[0,-1]:[-1,0]; const nr=r+d[0], nc=c+d[1]; if(inBounds(nr,nc) && GRID[nr][nc]!=='#') return {r:nr,c:nc}; return null; }
 function checkCurrent(){
   document.querySelectorAll('.cell').forEach(el=>el.classList.remove('bad'));
   const ent = getEntryAt(current.r,current.c,direction); if(!ent) return;
@@ -441,9 +435,7 @@ function revealCurrent(){
 }
 function nextWord(){
   let starts=[];
-  for(let r=0;r<SIZE;r++) for(let c=0;c<SIZE;c++){
-    if(numbers[r][c]) starts.push({r,c});
-  }
+  for(let r=0;r<SIZE;r++) for(let c=0;c<SIZE;c++){ if(numbers[r][c]) starts.push({r,c}); }
   starts.sort((a,b)=> numbers[a.r][a.c]-numbers[b.r][b.c]);
   let idx = starts.findIndex(s=> s.r===current.r && s.c===current.c);
   idx = (idx+1) % starts.length;
@@ -454,56 +446,42 @@ function nextWord(){
 function startTimer(){
   if(timerId) clearInterval(timerId);
   startAt = now();
-  timerId = setInterval(()=>{
-    const secs = (now()-startAt)/1000;
-    document.getElementById('timer').textContent = secToMMSS(secs);
-  }, 300);
+  timerId = setInterval(()=>{ const secs=(now()-startAt)/1000; document.getElementById('timer').textContent = secToMMSS(secs); }, 300);
 }
 function updateProgress(){
-  // 정답 GRID와 비교
-  let total=0, correct=0, filled=0;
+  let total=0, correct=0;
   for(let r=0;r<SIZE;r++) for(let c=0;c<SIZE;c++){
     if(GRID[r][c]==='#') continue;
     total++;
     const val = (document.getElementById(id(r,c)).querySelector('input')?.value||'').toUpperCase();
-    if(val) filled++;
     if(val===GRID[r][c].toUpperCase()) correct++;
   }
   const pct = Math.round(100*correct/total);
   document.getElementById('prog').value = pct;
   document.getElementById('progTxt').textContent = `진행 ${pct}%`;
-  if(ROOM && db && NICK){
-    db.ref(`${roomPath()}/stats/${encode(NICK)}`).set({
-      nick:NICK, progress:pct, updatedAt: now()
-    });
+  if(MULTI_ENABLED && ROOM && db && NICK){
+    db.ref(`${roomPath()}/stats/${encode(NICK)}`).set({nick:NICK, progress:pct, updatedAt: now()});
     if(pct===100){
-      // 완료 시간 최초 기록
       db.ref(`${roomPath()}/finish/${encode(NICK)}`).get().then(s=>{
-        if(!s.exists()){
-          db.ref(`${roomPath()}/finish/${encode(NICK)}`).set({ finishedAt: now(), nick:NICK });
-        }
+        if(!s.exists()){ db.ref(`${roomPath()}/finish/${encode(NICK)}`).set({ finishedAt: now(), nick:NICK }); }
       });
     }
   }
 }
 function bindRanking(){
-  if(!ROOM||!db) return;
-  // 완료 시간 랭킹
+  if(!MULTI_ENABLED || !ROOM||!db) return;
   db.ref(`${roomPath()}/finish`).on('value', snap=>{
-    const tbody = document.getElementById('rank');
-    const arr = [];
-    const val = snap.val()||{};
-    for(const k in val){
-      arr.push({nick:val[k].nick, finishedAt: val[k].finishedAt});
-    }
+    const tbody = document.getElementById('rank'); tbody.innerHTML='';
+    const arr = []; const val = snap.val()||{};
+    for(const k in val){ arr.push({nick:val[k].nick, finishedAt: val[k].finishedAt}); }
     arr.sort((a,b)=> a.finishedAt - b.finishedAt);
-    tbody.innerHTML='';
+    if(arr.length===0){ tbody.innerHTML = `<tr><td colspan="4" class="muted">아직 기록이 없습니다.</td></tr>`; return; }
     arr.forEach((r,i)=>{
-      // 해당 시점의 진행도도 옆에 표시
       db.ref(`${roomPath()}/stats/${encode(r.nick)}`).get().then(s=>{
-        const prog = s.exists()? (s.val().progress||0) : 0;
+        const prog = s.exists()? (s.val().progress||0) : 100;
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${i+1}</td><td>${r.nick}</td><td>${secToMMSS((r.finishedAt-(startAt||r.finishedAt))/1000)}</td><td>${prog}%</td>`;
+        const base = startAt ? secToMMSS((r.finishedAt-startAt)/1000) : '—';
+        tr.innerHTML = `<td>${i+1}</td><td>${r.nick}</td><td>${base}</td><td>${prog}%</td>`;
         tbody.appendChild(tr);
       });
     });
@@ -511,33 +489,40 @@ function bindRanking(){
 }
 
 /* ===== 멀티플레이 동기화 ===== */
-function initFirebase(){ if(db) return; const app=firebase.initializeApp(firebaseConfig); db=firebase.database(); }
+function initFirebase(){
+  if(!MULTI_ENABLED){ setStatus('싱글모드: Firebase 미설정'); return; }
+  try{
+    const app=firebase.initializeApp(firebaseConfig);
+    db=firebase.database();
+  }catch(e){
+    MULTI_ENABLED=false; setStatus('싱글모드: Firebase 초기화 실패'); 
+    document.getElementById('roomInfo').textContent = `방: 미연결(싱글모드)`;
+  }
+}
 function roomPath(){ return `rooms/${ROOM}`; }
 function encode(s){ return encodeURIComponent(s).replace(/\./g, '%2E'); }
 
 function pushValue(r,c,val){
-  if(!ROOM || !db) return;
-  db.ref(`${roomPath()}/grid/${r}_${c}`).set((val||"").toUpperCase());
+  // 로컬 반영
+  const el = document.getElementById(id(r,c))?.querySelector('input');
+  if(el) el.value = (val||"").toUpperCase();
+  // 멀티 반영
+  if(MULTI_ENABLED && ROOM && db){ db.ref(`${roomPath()}/grid/${r}_${c}`).set((val||"").toUpperCase()); }
 }
 function getValue(r,c){ return ""; } // 초기 렌더는 공란
 
 function bindRoom(){
+  if(!MULTI_ENABLED){ return; }
   if(!ROOM || !db) return;
-  // 퍼즐 공유 정보
-  db.ref(`${roomPath()}/meta`).on('value', snap=>{
-    // seed/meta가 바뀌면 재생성하도록 할 수도 있음 (여기선 생략)
-  });
-  // 입력 동기화
   db.ref(`${roomPath()}/grid`).on('value', snap=>{
     const obj = snap.val()||{};
     for(const k in obj){
       const [r,c] = k.split('_').map(Number);
       const el = document.getElementById(id(r,c))?.querySelector('input');
-      if(el && el.value !== obj[k]){ el.value = obj[k] || ""; }
+      if(el && el.value !== obj[k]) el.value = obj[k] || "";
     }
     updateProgress();
   });
-  // 참석자 프레즌스
   const conRef = db.ref('.info/connected');
   conRef.on('value', (snap) => {
     if (snap.val() === true) {
@@ -555,6 +540,7 @@ function bindRoom(){
 /* ===== 이벤트 ===== */
 document.getElementById('createRoom').addEventListener('click', ()=>{
   initFirebase();
+  if(!MULTI_ENABLED){ alert('Firebase 미설정: 싱글모드로 실행됩니다.'); return; }
   NICK = document.getElementById('nick').value.trim() || `user-${Math.random().toString(36).slice(2,6)}`;
   ROOM = document.getElementById('room').value.trim();
   if(!ROOM){ alert('방코드를 입력하세요'); return; }
@@ -564,6 +550,7 @@ document.getElementById('createRoom').addEventListener('click', ()=>{
 });
 document.getElementById('joinRoom').addEventListener('click', ()=>{
   initFirebase();
+  if(!MULTI_ENABLED){ alert('Firebase 미설정: 싱글모드로 실행됩니다.'); return; }
   NICK = document.getElementById('nick').value.trim() || `user-${Math.random().toString(36).slice(2,6)}`;
   ROOM = document.getElementById('room').value.trim();
   if(!ROOM){ alert('방코드를 입력하세요'); return; }
@@ -577,9 +564,7 @@ document.getElementById('fetchWords').addEventListener('click', async ()=>{
   setStatus('연관 단어 수집 및 힌트 고도화 중…');
   try{
     let cand = await fetchRelatedWords(topic, 60);
-    // 너무 많은 경우 상위 길이 위주로 섞어서 28개 정도로 압축
     cand = cand.sort((a,b)=> b.word.length - a.word.length).slice(0,28);
-    // 금칙/중복 이중 체크
     cand = cand.filter(x=>!containsBadWord(x.word));
     WORDS = cand;
     setStatus(`단어 ${WORDS.length}개 준비 완료. [퍼즐 생성]을 누르세요.`);
@@ -590,17 +575,15 @@ document.getElementById('fetchWords').addEventListener('click', async ()=>{
 
 document.getElementById('build').addEventListener('click', ()=>{
   if(!WORDS || WORDS.length===0){ alert('먼저 단어를 가져오세요.'); return; }
-  // 목표 20개 정도로 맞추기 위해 우선 24개로 시도 → 배치 후 placed 길이에 맞춤
   const pool = [...WORDS].slice(0, 24);
   pool.forEach(w=> delete w._placed);
   const placed = buildCrossword(pool);
-  // 배치 후 실제 배치된 것만 WORDS로 유지
   WORDS = pool.filter(w=> w._placed).slice(0, MAX_WORDS);
   setStatus(`퍼즐 생성 완료: 실제 배치 ${WORDS.length}개`);
   render();
   startTimer();
   updateProgress();
-  if(ROOM && db && NICK){
+  if(MULTI_ENABLED && ROOM && db && NICK){
     db.ref(`${roomPath()}/stats/${encode(NICK)}`).set({nick:NICK, progress:0, updatedAt: now()});
   }
 });
@@ -608,22 +591,7 @@ document.getElementById('build').addEventListener('click', ()=>{
 document.getElementById('check').addEventListener('click', ()=> checkCurrent());
 document.getElementById('reveal').addEventListener('click', ()=> revealCurrent());
 
-/* ===== 초기 도움 ===== */
 document.getElementById('dirPill').textContent = `방향: ${direction==='across'?'가로':'세로'}`;
-
-/* ===== 보조 ===== */
-function nextWord() {
-  let starts=[];
-  for(let r=0;r<SIZE;r++) for(let c=0;c<SIZE;c++){
-    if(numbers[r][c]) starts.push({r,c});
-  }
-  starts.sort((a,b)=> numbers[a.r][a.c]-numbers[b.r][b.c]);
-  let idx = starts.findIndex(s=> s.r===current.r && s.c===current.c);
-  idx = (idx+1) % starts.length;
-  focusCell(starts[idx].r, starts[idx].c);
-}
-
-/* ===== 끝 ===== */
 </script>
 </body>
 </html>
